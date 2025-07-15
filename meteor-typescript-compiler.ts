@@ -7,6 +7,7 @@ import { bold, dim, reset } from "chalk";
  */
 
 let traceEnabled = false;
+let traceModuleRewrite = false;
 
 /**
  * @returns undefined if enviroment variable is unset or an empty string,
@@ -26,6 +27,22 @@ const failOnErrors = !!getBooleanEnvironmentVariable(
 );
 
 const sourceMapOverride = getBooleanEnvironmentVariable("TYPESCRIPT_SOURCEMAP");
+// Determine if separate client/server compilation should be enabled.
+// Priority:
+// 1. Explicit environment variable TYPESCRIPT_SEPARATE_CLIENT_SERVER_COMPILATION
+//    • "0" / "false"  -> false
+//    • "1" / "true"   -> true
+// 2. If env var is unset, enable when either tsconfig-client.json or tsconfig-server.json is present in cwd.
+
+const separateCompilationEnv = getBooleanEnvironmentVariable(
+  "TYPESCRIPT_SEPARATE_CLIENT_SERVER_COMPILATION"
+);
+
+const separateCompilation =
+  separateCompilationEnv !== undefined
+    ? separateCompilationEnv
+    : ts.sys.fileExists("tsconfig-client.json") ||
+      ts.sys.fileExists("tsconfig-server.json");
 
 export function setTraceEnabled(enabled: boolean) {
   traceEnabled = enabled;
@@ -202,15 +219,188 @@ function getDiagnosticMessage(
       diagnostic.messageText,
       "\n"
     );
-    return `${getRelativeFileName(
-      diagnostic.file.fileName,
-      sourceRoot ?? ""
-    )} (${line + 1},${character + 1}): ${message}`;
+    return `${diagnostic.file.fileName}:${line + 1}:${character + 1}: ${message}`;
   }
   return ts.flattenDiagnosticMessageText(
     diagnostic.messageText,
     ts.sys.newLine
   );
+}
+
+/**
+ * Creates a TypeScript transformer that rewrites import statements to use module suffixes
+ * based on the tsconfig moduleSuffixes setting
+ */
+function createModuleSuffixTransformer(
+  program: ts.Program
+): ts.TransformerFactory<ts.SourceFile> {
+  return (context: ts.TransformationContext) => {
+    const compilerOptions = program.getCompilerOptions();
+    const moduleSuffixes = compilerOptions.moduleSuffixes || [];
+
+    // Get all non-empty suffixes
+    const nonEmptySuffixes = moduleSuffixes.filter(suffix => suffix !== "");
+
+    if (nonEmptySuffixes.length === 0) {
+      // No suffixes to apply, return identity transformer
+      return (sourceFile: ts.SourceFile) => sourceFile;
+    }
+
+    // Pre-create module resolution host to avoid recreating it for each call
+    const moduleResolutionHost = {
+      fileExists: ts.sys.fileExists,
+      readFile: ts.sys.readFile,
+      getCurrentDirectory: ts.sys.getCurrentDirectory,
+      getDirectories: ts.sys.getDirectories,
+      realpath: ts.sys.realpath,
+      trace: ts.sys.write,
+      directoryExists: ts.sys.directoryExists,
+      getCanonicalFileName: ts.sys.useCaseSensitiveFileNames ? (f: string) => f : (f: string) => f.toLowerCase()
+    };
+
+    return (sourceFile: ts.SourceFile) => {
+      // Create a cache for resolved modules for this source file to avoid duplicate resolution
+      const moduleResolutionCache = new Map<string, string>();
+
+      const visit = (node: ts.Node): ts.Node => {
+        // Handle import declarations: import ... from "module"
+        if (ts.isImportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+          const moduleSpecifier = node.moduleSpecifier.text;
+          const rewrittenSpecifier = rewriteModuleSpecifier(
+            moduleSpecifier,
+            nonEmptySuffixes,
+            compilerOptions,
+            moduleResolutionHost,
+            sourceFile,
+            moduleResolutionCache
+          );
+
+          if (rewrittenSpecifier !== moduleSpecifier) {
+            if (traceModuleRewrite)
+              trace(`Rewriting import "${moduleSpecifier}" to "${rewrittenSpecifier}"`);
+            return ts.factory.updateImportDeclaration(
+              node,
+              node.modifiers,
+              node.importClause,
+              ts.factory.createStringLiteral(rewrittenSpecifier),
+              node.assertClause
+            );
+          }
+        }
+
+        // Handle export declarations: export ... from "module"
+        if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+          const moduleSpecifier = node.moduleSpecifier.text;
+          const rewrittenSpecifier = rewriteModuleSpecifier(
+            moduleSpecifier,
+            nonEmptySuffixes,
+            compilerOptions,
+            moduleResolutionHost,
+            sourceFile,
+            moduleResolutionCache
+          );
+
+          if (rewrittenSpecifier !== moduleSpecifier) {
+            if (traceModuleRewrite)
+              trace(`Rewriting export "${moduleSpecifier}" to "${rewrittenSpecifier}"`);
+            return ts.factory.updateExportDeclaration(
+              node,
+              node.modifiers,
+              node.isTypeOnly,
+              node.exportClause,
+              ts.factory.createStringLiteral(rewrittenSpecifier),
+              node.assertClause
+            );
+          }
+        }
+
+        // Handle dynamic imports: import("module")
+        if (ts.isCallExpression(node) &&
+            node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+            node.arguments.length === 1 &&
+            ts.isStringLiteral(node.arguments[0])) {
+          const moduleSpecifier = node.arguments[0].text;
+          const rewrittenSpecifier = rewriteModuleSpecifier(
+            moduleSpecifier,
+            nonEmptySuffixes,
+            compilerOptions,
+            moduleResolutionHost,
+            sourceFile,
+            moduleResolutionCache
+          );
+
+          if (rewrittenSpecifier !== moduleSpecifier) {
+            if (traceModuleRewrite)
+              trace(`Rewriting dynamic import "${moduleSpecifier}" to "${rewrittenSpecifier}"`);
+            return ts.factory.updateCallExpression(
+              node,
+              node.expression,
+              node.typeArguments,
+              [ts.factory.createStringLiteral(rewrittenSpecifier)]
+            );
+          }
+        }
+
+        return ts.visitEachChild(node, visit, context);
+      };
+
+      return ts.visitNode(sourceFile, visit) as ts.SourceFile;
+    };
+  };
+}
+
+/**
+ * Rewrites a module specifier to use the suffix that TypeScript resolved during module resolution
+ */
+function rewriteModuleSpecifier(
+  moduleSpecifier: string,
+  suffixes: string[],
+  compilerOptions: ts.CompilerOptions,
+  moduleResolutionHost: ts.ModuleResolutionHost,
+  currentSourceFile: ts.SourceFile,
+  moduleResolutionCache: Map<string, string>
+): string {
+  // Skip node_modules imports (but allow absolute paths starting with /)
+  if (!moduleSpecifier.startsWith('.') && !moduleSpecifier.startsWith('/')) {
+    return moduleSpecifier;
+  }
+
+  // Check cache first
+  const cacheKey = `${currentSourceFile.fileName}:${moduleSpecifier}`;
+  if (moduleResolutionCache.has(cacheKey)) {
+    return moduleResolutionCache.get(cacheKey)!;
+  }
+
+  let result = moduleSpecifier; // Default to original
+
+  const resolved = ts.resolveModuleName(
+    moduleSpecifier,
+    currentSourceFile.fileName,
+    compilerOptions,
+    moduleResolutionHost
+  );
+
+  if (resolved.resolvedModule?.resolvedFileName) {
+    const resolvedPath = resolved.resolvedModule.resolvedFileName;
+
+    // Check if the resolved file has any of our suffixes
+    for (const suffix of suffixes) {
+      if (suffix && resolvedPath.includes(suffix)) {
+        // Found a suffix in the resolved path, check if it's at the right position
+        // (before the file extension)
+        const withoutExt = resolvedPath.replace(/\.(ts|tsx|js|jsx)$/, '');
+        if (withoutExt.endsWith(suffix)) {
+          trace(`TypeScript resolved "${moduleSpecifier}" to "${resolvedPath}", applying suffix "${suffix}"`);
+          result = moduleSpecifier + suffix;
+          break;
+        }
+      }
+    }
+  }
+
+  // Cache the result
+  moduleResolutionCache.set(cacheKey, result);
+  return result;
 }
 
 type BuilderProgramType = ts.EmitAndSemanticDiagnosticsBuilderProgram;
@@ -258,15 +448,17 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
   }
 
   reportWatchStatus(
+    target: "server" | "client",
     diagnostic: ts.Diagnostic,
     _newLine: string,
     _options: ts.CompilerOptions,
     _errorCount?: number
   ) {
-    this.writeDiagnostics([diagnostic], undefined);
+    this.writeDiagnostics(target, [diagnostic], undefined);
   }
 
   emitAllAffectedFiles(
+    target: "server" | "client",
     program: BuilderProgramType,
     cache: CompilerCache,
     buildInfoFile: string,
@@ -301,6 +493,10 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
      * so we need to write it out if it changed.
      * Then we can also tell which files were recompiled and put the data into the cache.
      */
+    const transformers: ts.CustomTransformers = {
+      before: [createModuleSuffixTransformer(program.getProgram())]
+    };
+
     const emitResult = program.emit(
       undefined,
       (fileName, data, writeByteOrderMark, onError, sourceFiles) => {
@@ -325,11 +521,14 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
             }
           }
         }
-      }
+      },
+      undefined,
+      undefined,
+      transformers
     );
 
     const combinedDiagnostics = diagnostics.concat(emitResult.diagnostics);
-    this.writeDiagnostics(combinedDiagnostics, sourceRoot);
+    this.writeDiagnostics(target, combinedDiagnostics, sourceRoot);
 
     const endTime = Date.now();
     const delta = endTime - startTime;
@@ -341,30 +540,45 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     return { diagnostics: combinedDiagnostics };
   }
 
-  createWatcher(sourceRoot: string): WatcherInstance {
-    info(`Creating new Typescript watcher for ${sourceRoot}`);
+  createWatcher(
+    sourceRoot: string,
+    target: "server" | "client"
+  ): WatcherInstance {
+    info(`Creating new Typescript watcher for ${sourceRoot} ${separateCompilation ? `(${target})` : ""}`);
 
-    const configPath = ts.findConfigFile(
-      /*searchPath*/ "./",
-      ts.sys.fileExists,
-      "tsconfig.json"
-    );
+    // Locate the most specific tsconfig file for this target (if enabled), falling back to the default one
+    const configFileNames = separateCompilation
+      ? target === "server"
+        ? ["tsconfig-server.json", "tsconfig.json"]
+        : ["tsconfig-client.json", "tsconfig.json"]
+      : ["tsconfig.json"];
+    let configPath: string | undefined;
+    for (const fileName of configFileNames) {
+      configPath = ts.findConfigFile(
+        /*searchPath*/ "./",
+        ts.sys.fileExists,
+        fileName
+      );
+      if (configPath) {
+        break;
+      }
+    }
     if (!configPath) {
-      throw new Error("Could not find a valid 'tsconfig.json'.");
+      throw new Error(
+        "Could not find a valid Typescript configuration file (tsconfig*.json)."
+      );
     }
 
     // Important to make these paths absolute, see https://github.com/microsoft/TypeScript/issues/41690
-    // In "meteor test" mode. to not have simultanenous builds overwrite each other’s build files,
-    // cacheRoot will be a temporary folder where .meteor/local/plugin-cache and some other dirs are symlinked in,
-    // but Typescript wants the buildInfo file and outDir to be in a stable location relative the source dir
-    // so get us back to the source dir version of the directory (it’s the same content, just symlinked so no harm done)
-    // see tools/cli/commands.js for details
     const cacheRootRelativeSource = this.cacheRoot.substring(
       this.cacheRoot.indexOf("/.meteor/local")
     );
 
+    // Separate cache directories for client and server builds
     const rootOutDir = ts.sys.resolvePath(
-      `${sourceRoot}${cacheRootRelativeSource}/v2cache`
+      separateCompilation
+        ? `${sourceRoot}${cacheRootRelativeSource}/${target}/v2cache`
+        : `${sourceRoot}${cacheRootRelativeSource}/v2cache`
     );
 
     const outDir = `${rootOutDir}/out`;
@@ -388,14 +602,15 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       optionsToExtend,
       ts.sys,
       ts.createEmitAndSemanticDiagnosticsBuilderProgram,
-      (diagnostic) => this.writeDiagnostics([diagnostic], sourceRoot),
-      (...args) => this.reportWatchStatus(...args)
+      (diagnostic) => this.writeDiagnostics(target, [diagnostic], sourceRoot),
+      (...args) => this.reportWatchStatus(target, ...args)
     );
 
     let diagnostics: ReadonlyArray<ts.Diagnostic> = [];
 
     watchHost.afterProgramCreate = (program) => {
       ({ diagnostics } = this.emitAllAffectedFiles(
+        target,
         program,
         cache,
         buildInfoFile,
@@ -427,13 +642,17 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
   /**
    * Gets from cache or creates a new program
    */
-  getWatcherFor(directory: string): WatcherInstance {
-    const foundInCache = this.cachedWatchers.get(directory);
+  getWatcherFor(
+    directory: string,
+    target: "server" | "client"
+  ): WatcherInstance {
+    const key = separateCompilation ? `${directory}:${target}` : directory;
+    const foundInCache = this.cachedWatchers.get(key);
     if (foundInCache) {
       return foundInCache;
     }
-    const newEntry = this.createWatcher(directory);
-    this.cachedWatchers.set(directory, newEntry);
+    const newEntry = this.createWatcher(directory, target);
+    this.cachedWatchers.set(key, newEntry);
     return newEntry;
   }
 
@@ -445,24 +664,25 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     this.cacheRoot = path;
   }
 
-  writeDiagnosticMessage(message: string, category: ts.DiagnosticCategory) {
+  writeDiagnosticMessage(target: "server" | "client", message: string, category: ts.DiagnosticCategory) {
     switch (category) {
       case ts.DiagnosticCategory.Error:
-        return error(message);
+        return error(`${message} [${target}]`);
       case ts.DiagnosticCategory.Warning:
       case ts.DiagnosticCategory.Suggestion:
       case ts.DiagnosticCategory.Message:
-        return info(message);
+        return info(`${message} [${target}]`);
     }
   }
 
   writeDiagnostics(
+    target: "server" | "client",
     diagnostics: ReadonlyArray<ts.Diagnostic>,
     sourceRoot: string | undefined
   ) {
     for (const diagnostic of diagnostics) {
       const message = getDiagnosticMessage(diagnostic, sourceRoot);
-      this.writeDiagnosticMessage(message, diagnostic.category);
+      this.writeDiagnosticMessage(target, message, diagnostic.category);
     }
   }
 
@@ -531,9 +751,13 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     this.numEmittedFiles++;
 
     trace(`Emitting Javascript for ${inputFile.getPathInPackage()}`);
+    const transformers: ts.CustomTransformers = {
+      before: [createModuleSuffixTransformer(program.getProgram())]
+    };
+
     program.emit(sourceFile, function (fileName, data, writeByteOrderMark) {
       cache.writeEmittedFile(fileName, data, writeByteOrderMark);
-    });
+    }, undefined, undefined, transformers);
 
     const sourcePath = inputFile.getPathInPackage();
     const compiledResult = cache.get(sourcePath);
@@ -586,7 +810,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     inputFile: MeteorCompiler.InputFile,
     program: BuilderProgramType,
     cache: CompilerCache,
-    errors: ReadonlyArray<ts.Diagnostic>
+    errors: ReadonlyArray<ts.Diagnostic>,
+    target: string,
   ) {
     const inputFilePath = inputFile.getPathInPackage();
     const sourceFile =
@@ -594,9 +819,10 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       program.getSourceFile(ts.sys.resolvePath(inputFilePath));
 
     if (!sourceFile) {
-      trace(`Could not find source file for ${inputFilePath}`);
+      trace(`[${target}] Could not find source file for ${inputFilePath}`);
       return;
     }
+
     const errorsForFile = errors.filter(
       (error) => error.file?.fileName === sourceFile.fileName
     );
@@ -695,13 +921,21 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     const firstInput = inputFiles[0];
     const sourceRoot =
       firstInput.getSourceRoot(false) || ts.sys.getCurrentDirectory();
+
+    const arch = firstInput.getArch();
+    const targetType: "server" | "client" = arch.startsWith("os.")
+      ? "server"
+      : "client";
+
     info(
-      `Typescript processing requested for ${firstInput.getArch()} using Typescript ${
-        ts.version
-      }`
+      `Typescript processing requested for ${arch} (${targetType}) using Typescript ${ts.version}`+
+        (separateCompilation ? " with separate compilation" : "")
     );
 
-    const { watch, cache, getLastDiagnostics } = this.getWatcherFor(sourceRoot);
+    const { watch, cache, getLastDiagnostics } = this.getWatcherFor(
+      sourceRoot,
+      targetType
+    );
     // This both produces all dirty files and provides us an instance to emit ad-hoc in case a file went missing
     const program = watch.getProgram();
 
@@ -713,7 +947,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       const dirName = f.getDirname();
       return (
         !fileName.endsWith(".d.ts") &&
-        fileName !== "tsconfig.json" &&
+        !fileName.startsWith("tsconfig") &&
         // we really don’t want to compile .ts files in node_modules but meteor will send them
         // anyway as input files. Adding node_modules to .meteorignore causes other runtime problems
         // so this is a somewhat ugly workaround
@@ -725,7 +959,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     );
     const compilableFiles = inputFiles.filter(isCompilableFile);
     for (const inputFile of compilableFiles) {
-      this.emitResultFor(inputFile, program, cache, errors);
+      this.emitResultFor(inputFile, program, cache, errors, targetType);
     }
   }
 }
