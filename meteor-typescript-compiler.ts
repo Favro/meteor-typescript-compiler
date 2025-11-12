@@ -44,6 +44,10 @@ const separateCompilation =
     : ts.sys.fileExists("tsconfig-client.json") ||
       ts.sys.fileExists("tsconfig-server.json");
 
+const transformAsyncAwait = getBooleanEnvironmentVariable(
+  "TYPESCRIPT_TRANSFORM_ASYNC_AWAIT"
+) ?? true;
+
 export function setTraceEnabled(enabled: boolean) {
   traceEnabled = enabled;
 }
@@ -403,6 +407,135 @@ function rewriteModuleSpecifier(
   return result;
 }
 
+/**
+ * Creates a TypeScript transformer that converts async/await to Meteor's Fiber-aware Promise methods.
+ * This transformer is used on server-side code to convert:
+ * - await something -> Promise.await(something)
+ * - async function() { ... } -> function() { return Promise.try(() => { ... }); }
+ */
+function createAsyncAwaitTransformer(): ts.TransformerFactory<ts.SourceFile> {
+  return (context: ts.TransformationContext) => {
+    const factory = context.factory;
+
+    return (rootNode: ts.SourceFile) => {
+      const visit = (node: ts.Node): ts.Node => {
+        node = ts.visitEachChild(node, visit, context);
+
+        if (ts.isAwaitExpression(node)) {
+          // await something -> Promise.await(something)
+          return factory.createCallExpression(
+            factory.createPropertyAccessExpression(
+              factory.createIdentifier("Promise"),
+              factory.createIdentifier("await")
+            ),
+            undefined,
+            [node.expression]
+          );
+        }
+
+        // async function() { ... } -> function() {
+        //   return Promise.try(() => { ... });
+        // }
+
+        // Check if this node can have modifiers and has the async flag
+        if (!ts.canHaveModifiers(node)) {
+          return node;
+        }
+
+        const asyncFlag = ts.ModifierFlags.Async;
+        const nodeFlags = ts.getCombinedModifierFlags(node as any);
+
+        if ((nodeFlags & asyncFlag) === 0) {
+          return node;
+        }
+
+        // Filter out async modifier
+        const modifiers = ts.getModifiers(node as any);
+        const modifiersWithoutAsync = modifiers?.filter(
+          (modifier) => modifier.kind !== ts.SyntaxKind.AsyncKeyword
+        );
+
+        const promiseResultExpression = factory.createCallExpression(
+          factory.createPropertyAccessExpression(
+            factory.createIdentifier("Promise"),
+            factory.createIdentifier("try")
+          ),
+          undefined,
+          [
+            factory.createArrowFunction(
+              undefined,
+              undefined,
+              [],
+              undefined,
+              undefined,
+              (node as any).body
+            ),
+          ]
+        );
+
+        const promiseResultBlock = factory.createBlock([
+          factory.createReturnStatement(promiseResultExpression),
+        ]);
+
+        if (ts.isMethodDeclaration(node)) {
+          return factory.updateMethodDeclaration(
+            node,
+            modifiersWithoutAsync,
+            node.asteriskToken,
+            node.name,
+            node.questionToken,
+            node.typeParameters,
+            node.parameters,
+            node.type,
+            promiseResultBlock
+          );
+        } else if (ts.isFunctionExpression(node)) {
+          return factory.updateFunctionExpression(
+            node,
+            modifiersWithoutAsync,
+            node.asteriskToken,
+            node.name,
+            node.typeParameters,
+            node.parameters,
+            node.type,
+            promiseResultBlock
+          );
+        } else if (ts.isArrowFunction(node)) {
+          return factory.updateArrowFunction(
+            node,
+            modifiersWithoutAsync,
+            node.typeParameters,
+            node.parameters,
+            node.type,
+            node.equalsGreaterThanToken,
+            promiseResultExpression
+          );
+        } else if (ts.isFunctionDeclaration(node)) {
+          return factory.updateFunctionDeclaration(
+            node,
+            modifiersWithoutAsync,
+            node.asteriskToken,
+            node.name,
+            node.typeParameters,
+            node.parameters,
+            node.type,
+            promiseResultBlock
+          );
+        } else {
+          // See "src/compiler/types.ts" for all possible node kinds.
+          // Check replaceModifiers() in "src/compiler/factory/nodeFactory.ts" as an example on how to update nodes.
+          warn(
+            `Unexpected TypeScript node kind with async modifier: ${node.kind}, nodeFlags: ${nodeFlags}`
+          );
+          return node;
+        }
+      };
+
+      return ts.visitNode(rootNode, visit) as ts.SourceFile;
+    };
+  };
+}
+
 type BuilderProgramType = ts.EmitAndSemanticDiagnosticsBuilderProgram;
 
 type BuilderProgramOptions = Readonly<{
@@ -494,7 +627,10 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
      * Then we can also tell which files were recompiled and put the data into the cache.
      */
     const transformers: ts.CustomTransformers = {
-      before: [createModuleSuffixTransformer(program.getProgram())]
+      before: [
+        createModuleSuffixTransformer(program.getProgram()),
+        ...(target === "server" && transformAsyncAwait ? [createAsyncAwaitTransformer()] : [])
+      ]
     };
 
     const emitResult = program.emit(
@@ -746,13 +882,17 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     inputFile: MeteorCompiler.InputFile,
     sourceFile: ts.SourceFile,
     program: BuilderProgramType,
-    cache: CompilerCache
+    cache: CompilerCache,
+    target: "server" | "client"
   ): LocalEmitResult | undefined {
     this.numEmittedFiles++;
 
     trace(`Emitting Javascript for ${inputFile.getPathInPackage()}`);
     const transformers: ts.CustomTransformers = {
-      before: [createModuleSuffixTransformer(program.getProgram())]
+      before: [
+        createModuleSuffixTransformer(program.getProgram()),
+        ...(target === "server" && transformAsyncAwait ? [createAsyncAwaitTransformer()] : [])
+      ]
     };
 
     program.emit(sourceFile, function (fileName, data, writeByteOrderMark) {
@@ -776,7 +916,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     inputFile: MeteorCompiler.InputFile,
     sourceFile: ts.SourceFile,
     program: BuilderProgramType,
-    cache: CompilerCache
+    cache: CompilerCache,
+    target: "server" | "client"
   ): LocalEmitResult | undefined {
     const fromCache = cache.get(inputFile.getPathInPackage());
     if (fromCache) {
@@ -788,7 +929,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       this.numFilesFromCache++;
       return result;
     }
-    return this.emitForSource(inputFile, sourceFile, program, cache);
+    return this.emitForSource(inputFile, sourceFile, program, cache, target);
   }
 
   public inferExtraBabelOptions(
@@ -854,7 +995,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
           inputFile,
           sourceFile,
           program,
-          cache
+          cache,
+          target as "server" | "client"
         );
         if (!emitResult) {
           error(`Nothing emitted for ${inputFilePath}`);
