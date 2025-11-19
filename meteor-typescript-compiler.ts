@@ -1,5 +1,6 @@
 import * as ts from "typescript";
 import { bold, dim, reset } from "chalk";
+import * as path from "path";
 
 /**
  * compiler-console (could not figure out how to load from separate file/module)
@@ -554,6 +555,7 @@ type WatcherInstance = {
   readonly buildInfoFile: string;
   readonly cache: CompilerCache;
   readonly getLastDiagnostics: () => ReadonlyArray<ts.Diagnostic>;
+  readonly outDir: string;
 };
 
 export class MeteorTypescriptCompilerImpl extends BabelCompiler {
@@ -595,7 +597,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     program: BuilderProgramType,
     cache: CompilerCache,
     buildInfoFile: string,
-    sourceRoot: string
+    sourceRoot: string,
+    outDir: string
   ) {
     const startTime = Date.now();
     this.clearStats();
@@ -642,18 +645,29 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
               sourceFiles[0].fileName,
               sourceRoot
             );
+
+
+            // Recalculate fileName to avoid symlink issues
+            const outputFileName = path.basename(fileName);
+            const relativeDirPath = path.dirname(relativeSourceFilePath);
+            const cleanFileName = path.join(
+              outDir,
+              relativeDirPath,
+              outputFileName
+            );
+
             if (fileName.match(/\.js$/)) {
               info(`Compiling ${relativeSourceFilePath}`);
               this.numCompiledFiles++;
               this.addJavascriptToCache(
-                fileName,
+                cleanFileName,
                 data,
                 writeByteOrderMark,
                 cache
               );
             }
             if (fileName.match(/\.map$/)) {
-              cache.writeEmittedFile(fileName, data, writeByteOrderMark);
+              cache.writeEmittedFile(cleanFileName, data, writeByteOrderMark);
             }
           }
         }
@@ -750,7 +764,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
         program,
         cache,
         buildInfoFile,
-        sourceRoot
+        sourceRoot,
+        outDir
       ));
     };
 
@@ -762,6 +777,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       getLastDiagnostics() {
         return diagnostics;
       },
+      outDir,
     };
   }
 
@@ -883,7 +899,9 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     sourceFile: ts.SourceFile,
     program: BuilderProgramType,
     cache: CompilerCache,
-    target: "server" | "client"
+    target: "server" | "client",
+    sourceRoot: string,
+    outDir: string
   ): LocalEmitResult | undefined {
     this.numEmittedFiles++;
 
@@ -896,7 +914,19 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     };
 
     program.emit(sourceFile, function (fileName, data, writeByteOrderMark) {
-      cache.writeEmittedFile(fileName, data, writeByteOrderMark);
+      // Recalculate fileName to avoid symlink issues
+      const relativeSourceFilePath = getRelativeFileName(
+        sourceFile.fileName,
+        sourceRoot
+      );
+      const outputFileName = path.basename(fileName);
+      const relativeDirPath = path.dirname(relativeSourceFilePath);
+      const cleanFileName = path.join(
+        outDir,
+        relativeDirPath,
+        outputFileName
+      );
+      cache.writeEmittedFile(cleanFileName, data, writeByteOrderMark);
     }, undefined, undefined, transformers);
 
     const sourcePath = inputFile.getPathInPackage();
@@ -917,7 +947,9 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     sourceFile: ts.SourceFile,
     program: BuilderProgramType,
     cache: CompilerCache,
-    target: "server" | "client"
+    target: "server" | "client",
+    sourceRoot: string,
+    outDir: string
   ): LocalEmitResult | undefined {
     const fromCache = cache.get(inputFile.getPathInPackage());
     if (fromCache) {
@@ -929,7 +961,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       this.numFilesFromCache++;
       return result;
     }
-    return this.emitForSource(inputFile, sourceFile, program, cache, target);
+    return this.emitForSource(inputFile, sourceFile, program, cache, target, sourceRoot, outDir);
   }
 
   public inferExtraBabelOptions(
@@ -953,6 +985,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     cache: CompilerCache,
     errors: ReadonlyArray<ts.Diagnostic>,
     target: string,
+    sourceRoot: string,
+    outDir: string
   ) {
     const inputFilePath = inputFile.getPathInPackage();
     const sourceFile =
@@ -996,7 +1030,9 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
           sourceFile,
           program,
           cache,
-          target as "server" | "client"
+          target as "server" | "client",
+          sourceRoot,
+          outDir
         );
         if (!emitResult) {
           error(`Nothing emitted for ${inputFilePath}`);
@@ -1074,7 +1110,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
         (separateCompilation ? " with separate compilation" : "")
     );
 
-    const { watch, cache, getLastDiagnostics } = this.getWatcherFor(
+    const { watch, cache, getLastDiagnostics, outDir } = this.getWatcherFor(
       sourceRoot,
       targetType
     );
@@ -1090,7 +1126,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       return (
         !fileName.endsWith(".d.ts") &&
         !fileName.startsWith("tsconfig") &&
-        // we really don’t want to compile .ts files in node_modules but meteor will send them
+        // we really don't want to compile .ts files in node_modules but meteor will send them
         // anyway as input files. Adding node_modules to .meteorignore causes other runtime problems
         // so this is a somewhat ugly workaround
         !dirName.startsWith("node_modules/")
@@ -1101,7 +1137,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     );
     const compilableFiles = inputFiles.filter(isCompilableFile);
     for (const inputFile of compilableFiles) {
-      this.emitResultFor(inputFile, program, cache, errors, targetType);
+      this.emitResultFor(inputFile, program, cache, errors, targetType, sourceRoot, outDir);
     }
   }
 }
