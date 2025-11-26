@@ -1,5 +1,5 @@
 import * as ts from "typescript";
-import { bold, dim, reset } from "chalk";
+import chalk from "chalk";
 import * as path from "path";
 
 /**
@@ -62,20 +62,24 @@ export function setTraceEnabled(enabled: boolean) {
 }
 
 export function error(msg: string, ...other: string[]) {
-  process.stderr.write(bold.red(msg) + reset(other.join(" ")) + "\n");
+  process.stderr.write(chalk.red(msg) + other.join(" ") + "\n");
+}
+
+export function rawError(msg: string, ...other: string[]) {
+  process.stderr.write(msg + other.join(" ") + "\n");
 }
 
 export function warn(msg: string, ...other: string[]) {
-  process.stderr.write(bold.yellow(msg) + reset(other.join(" ")) + "\n");
+  process.stderr.write(chalk.bold.yellow(msg) + other.join(" ") + "\n");
 }
 
 export function info(msg: string) {
-  process.stdout.write(bold.green(msg) + dim(" ") + "\n");
+  process.stdout.write(msg + "\n");
 }
 
 export function trace(msg: string) {
   if (traceEnabled) {
-    process.stdout.write(dim(msg) + dim(" ") + "\n");
+    process.stdout.write(chalk.dim(msg) + " \n");
   }
 }
 
@@ -222,7 +226,8 @@ function getRelativeFileName(filename: string, sourceRoot: string): string {
 
 function getDiagnosticMessage(
   diagnostic: ts.Diagnostic,
-  sourceRoot: string | undefined
+  sourceRoot: string | undefined,
+  useColor = false,
 ): string {
   if (diagnostic.file && diagnostic.start !== undefined) {
     const { line, character } = diagnostic.file.getLineAndCharacterOfPosition(
@@ -232,7 +237,17 @@ function getDiagnosticMessage(
       diagnostic.messageText,
       "\n"
     );
-    return `${diagnostic.file.fileName}:${line + 1}:${character + 1}: ${message}`;
+    if (useColor) {
+      let color = (str: string) => str;
+      if (diagnostic.category == ts.DiagnosticCategory.Error)
+        color = chalk.redBright;
+      else if (diagnostic.category == ts.DiagnosticCategory.Warning)
+        color = chalk.hex("#ec9108");
+
+      return chalk.dim(`${diagnostic.file.fileName}:${line + 1}:${character + 1}: `) + color(message);
+    } else {
+      return `${diagnostic.file.fileName}:${line + 1}:${character + 1}: ${message}`;
+    }
   }
   return ts.flattenDiagnosticMessageText(
     diagnostic.messageText,
@@ -826,12 +841,12 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
   writeDiagnosticMessage(target: "server" | "client", message: string, category: ts.DiagnosticCategory) {
     switch (category) {
       case ts.DiagnosticCategory.Error:
-        return error(`${message} [${target}]`);
+        return rawError(`${message} ${chalk.dim(`[${target}]`)}`);
       case ts.DiagnosticCategory.Warning:
       case ts.DiagnosticCategory.Suggestion:
       case ts.DiagnosticCategory.Message:
         if (message != "Starting compilation in watch mode...")
-          return info(`${message} [${target}]`);
+          return info(`${message} ${chalk.dim(`[${target}]`)}`);
     }
   }
 
@@ -841,7 +856,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     sourceRoot: string | undefined
   ) {
     for (const diagnostic of diagnostics) {
-      const message = getDiagnosticMessage(diagnostic, sourceRoot);
+      const message = getDiagnosticMessage(diagnostic, sourceRoot, true);
       this.writeDiagnosticMessage(target, message, diagnostic.category);
     }
   }
@@ -921,7 +936,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       ]
     };
 
-    program.emit(sourceFile, function(fileName, data, writeByteOrderMark) {
+    program.emit(sourceFile, function (fileName, data, writeByteOrderMark) {
       // Recalculate fileName to avoid symlink issues
       const relativeSourceFilePath = getRelativeFileName(
         sourceFile.fileName,
