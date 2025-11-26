@@ -31,6 +31,10 @@ const forwardTypescriptErrors = getBooleanEnvironmentVariable(
   "TYPESCRIPT_FORWARD_TYPESCRIPT_ERRORS"
 ) ?? false;
 
+const useBabelTransform = getBooleanEnvironmentVariable(
+  "TYPESCRIPT_USE_BABEL_TRANSFORM"
+) ?? false;
+
 const sourceMapOverride = getBooleanEnvironmentVariable("TYPESCRIPT_SOURCEMAP");
 // Determine if separate client/server compilation should be enabled.
 // Priority:
@@ -1056,18 +1060,29 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
         // To get Babel processing, we must invoke it ourselves via the
         // inherited BabelCompiler method processOneFileForTarget
         // To get the source map injected we override inferExtraBabelOptions
-        if (sourceMap) {
-          this.withSourceMap = {
-            sourceMap,
-            pathInPackage: inputFilePath,
+        if (useBabelTransform) {
+          if (sourceMap) {
+            this.withSourceMap = {
+              sourceMap,
+              pathInPackage: inputFilePath,
+            };
+          }
+
+          const jsData = this.processOneFileForTarget(inputFile, data);
+          // Use the same hash as in the deferred data
+          return {
+            ...jsData,
+            hash,
           };
         }
-        const jsData = this.processOneFileForTarget(inputFile, data);
-        // Use the same hash as in the deferred data
+
         return {
-          ...jsData,
+          sourcePath: sourceFile,
+          path: emitResult.fileName,
+          data,
           hash,
-        };
+          sourceMap
+        }
       });
     } catch (e: any) {
       error(e.message);
