@@ -23,9 +23,9 @@ function getBooleanEnvironmentVariable(key: string): boolean | undefined {
   return !["0", "false"].includes(value);
 }
 
-const failOnErrors = !!getBooleanEnvironmentVariable(
+const failOnErrors = getBooleanEnvironmentVariable(
   "TYPESCRIPT_FAIL_ON_COMPILATION_ERRORS"
-);
+) ?? true;
 
 const forwardTypescriptErrors = getBooleanEnvironmentVariable(
   "TYPESCRIPT_FORWARD_TYPESCRIPT_ERRORS"
