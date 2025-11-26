@@ -16,7 +16,7 @@ Package.describe({
 
 Npm.depends({
   "typescript": TYPESCRIPT_VERSION,
-  "chalk": "4.0.0",
+  "chalk": "4.1.2",
   "@types/node": "22.13.5",
 });
 
