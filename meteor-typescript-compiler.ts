@@ -625,7 +625,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       writeByteOrderMark: boolean
     ): boolean => {
       if (fileName === buildInfoFile) {
-        info(`Writing ${getRelativeFileName(buildInfoFile, sourceRoot)}`);
+        trace(`Writing ${getRelativeFileName(buildInfoFile, sourceRoot)}`);
         cache.writeEmittedFile(fileName, data, writeByteOrderMark);
         return true;
       }
@@ -665,7 +665,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
             );
 
             if (fileName.match(/\.js$/)) {
-              info(`Compiling ${relativeSourceFilePath}`);
+              trace(`Compiling ${relativeSourceFilePath}`);
               this.numCompiledFiles++;
               this.addJavascriptToCache(
                 cleanFileName,
@@ -690,9 +690,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
 
     const endTime = Date.now();
     const delta = endTime - startTime;
-    info(
-      `Compilation finished in ${msToSec(delta)} seconds. ${
-        this.numCompiledFiles
+    trace(
+      `Compilation finished in ${msToSec(delta)} seconds. ${this.numCompiledFiles
       } files were (re)compiled.`
     );
     return { diagnostics: combinedDiagnostics };
@@ -702,7 +701,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     sourceRoot: string,
     target: "server" | "client"
   ): WatcherInstance {
-    info(`Creating new Typescript watcher for ${sourceRoot} ${separateCompilation ? `(${target})` : ""}`);
+    trace(`Creating new Typescript watcher for ${sourceRoot} ${separateCompilation ? `(${target})` : ""}`);
 
     // Locate the most specific tsconfig file for this target (if enabled), falling back to the default one
     const configFileNames = separateCompilation
@@ -743,7 +742,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     const buildInfoFile = `${rootOutDir}/buildfile.tsbuildinfo`;
     const cache = new CompilerCache(outDir);
     if (sourceMapOverride !== undefined) {
-      info(`Overriding sourceMap setting to ${sourceMapOverride}`);
+      trace(`Overriding sourceMap setting to ${sourceMapOverride}`);
     }
     const optionsToExtend: ts.CompilerOptions = {
       incremental: true,
@@ -831,7 +830,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       case ts.DiagnosticCategory.Warning:
       case ts.DiagnosticCategory.Suggestion:
       case ts.DiagnosticCategory.Message:
-        return info(`${message} [${target}]`);
+        if (message != "Starting compilation in watch mode...")
+          return info(`${message} [${target}]`);
     }
   }
 
@@ -921,7 +921,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       ]
     };
 
-    program.emit(sourceFile, function (fileName, data, writeByteOrderMark) {
+    program.emit(sourceFile, function(fileName, data, writeByteOrderMark) {
       // Recalculate fileName to avoid symlink issues
       const relativeSourceFilePath = getRelativeFileName(
         sourceFile.fileName,
@@ -1104,9 +1104,8 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     if (this.numStoredFiles > 0) {
       const endTime = Date.now();
       const delta = endTime - this.processStartTime;
-      info(
-        `Typescript summary: ${msToSec(delta)} seconds for sending ${
-          this.numStoredFiles
+      trace(
+        `Typescript summary: ${msToSec(delta)} seconds for sending ${this.numStoredFiles
         } transpiled files on for bundling`
       );
       if (this.numEmittedFiles > 0) {
@@ -1134,9 +1133,9 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       ? "server"
       : "client";
 
-    info(
-      `Typescript processing requested for ${arch} (${targetType}) using Typescript ${ts.version}`+
-        (separateCompilation ? " with separate compilation" : "")
+    trace(
+      `Typescript processing requested for ${arch} (${targetType}) using Typescript ${ts.version}` +
+      (separateCompilation ? " with separate compilation" : "")
     );
 
     const { watch, cache, getLastDiagnostics, outDir } = this.getWatcherFor(
