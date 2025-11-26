@@ -1154,7 +1154,22 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       this.emitResultFor(inputFile, program, cache, errors, targetType, sourceRoot, outDir);
     }
   }
+
+  /**
+   * Called by Meteor when this plugin is being replaced (e.g., during hot-reload).
+   * Closes all TypeScript watch instances to prevent memory leaks.
+   */
+  dispose(): void {
+    this.cachedWatchers.forEach((watcher) => {
+      try {
+        watcher.watch.close();
+      } catch (e) {
+        // Ignore errors during cleanup
+      }
+    });
+    this.cachedWatchers.clear();
+  }
 }
 
-// I haven’t figured out how to use a proper export here
+// I haven't figured out how to use a proper export here
 MeteorTypescriptCompiler = MeteorTypescriptCompilerImpl;
