@@ -27,6 +27,10 @@ const failOnErrors = !!getBooleanEnvironmentVariable(
   "TYPESCRIPT_FAIL_ON_COMPILATION_ERRORS"
 );
 
+const forwardTypescriptErrors = getBooleanEnvironmentVariable(
+  "TYPESCRIPT_FORWARD_TYPESCRIPT_ERRORS"
+) ?? false;
+
 const sourceMapOverride = getBooleanEnvironmentVariable("TYPESCRIPT_SOURCEMAP");
 // Determine if separate client/server compilation should be enabled.
 // Priority:
@@ -1002,23 +1006,33 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       (error) => error.file?.fileName === sourceFile.fileName
     );
     if (errorsForFile.length > 0) {
-      const sourceRoot = inputFile.getSourceRoot(false);
       if (failOnErrors) {
-        for (const diagnostic of errorsForFile) {
-          if (diagnostic.file && diagnostic.start !== undefined) {
-            const { line } = diagnostic.file.getLineAndCharacterOfPosition(
-              diagnostic.start
-            );
-            inputFile.error({
-              func: "",
-              line,
-              sourcePath: inputFilePath,
-              message: getDiagnosticMessage(diagnostic, sourceRoot),
-            });
+        if (forwardTypescriptErrors) {
+          const sourceRoot = inputFile.getSourceRoot(false);
+          for (const diagnostic of errorsForFile) {
+            if (diagnostic.file && diagnostic.start !== undefined) {
+              const { line } = diagnostic.file.getLineAndCharacterOfPosition(
+                diagnostic.start
+              );
+              inputFile.error({
+                func: "",
+                line,
+                sourcePath: inputFilePath,
+                message: getDiagnosticMessage(diagnostic, sourceRoot),
+              });
+            }
           }
+        } else {
+          inputFile.error({
+            func: "",
+            line: 0,
+            sourcePath: "",
+            message: "Check TypeScript errors",
+          });
         }
       }
     }
+
     try {
       const sourcePath = inputFile.getPathInPackage();
       const bare = isBare(inputFile);
