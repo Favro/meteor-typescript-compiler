@@ -51,7 +51,7 @@ const separateCompilation =
   separateCompilationEnv !== undefined
     ? separateCompilationEnv
     : ts.sys.fileExists("tsconfig-client.json") ||
-      ts.sys.fileExists("tsconfig-server.json");
+    ts.sys.fileExists("tsconfig-server.json");
 
 const transformAsyncAwait = getBooleanEnvironmentVariable(
   "TYPESCRIPT_TRANSFORM_ASYNC_AWAIT"
@@ -123,7 +123,7 @@ interface CacheContainer {
  * Stores output from typescript on disk
  */
 export class CompilerCache {
-  constructor(public cachedFilesRoot: string) {}
+  constructor(public cachedFilesRoot: string) { }
 
   private getKey(sourceFilePath: string) {
     // Remove extension (.ts, .tsx)
@@ -329,9 +329,9 @@ function createModuleSuffixTransformer(
 
         // Handle dynamic imports: import("module")
         if (ts.isCallExpression(node) &&
-            node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-            node.arguments.length === 1 &&
-            ts.isStringLiteral(node.arguments[0])) {
+          node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+          node.arguments.length === 1 &&
+          ts.isStringLiteral(node.arguments[0])) {
           const moduleSpecifier = node.arguments[0].text;
           const rewrittenSpecifier = rewriteModuleSpecifier(
             moduleSpecifier,
