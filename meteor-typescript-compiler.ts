@@ -35,6 +35,10 @@ const useBabelTransform = getBooleanEnvironmentVariable(
   "TYPESCRIPT_USE_BABEL_TRANSFORM"
 ) ?? false;
 
+const supportWatchMode = getBooleanEnvironmentVariable(
+  "TYPESCRIPT_SUPPORT_WATCH_MODE"
+) ?? false;
+
 const sourceMapOverride = getBooleanEnvironmentVariable("TYPESCRIPT_SOURCEMAP");
 // Determine if separate client/server compilation should be enabled.
 // Priority:
@@ -626,6 +630,9 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
     const startTime = Date.now();
     this.clearStats();
 
+    if (supportWatchMode)
+       info(`\nStarted compilation ${chalk.dim(`[${target}]`)}\n`);
+
     const diagnostics = [
       ...program.getConfigFileParsingDiagnostics(),
       ...program.getSyntacticDiagnostics(),
@@ -709,6 +716,10 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       `Compilation finished in ${msToSec(delta)} seconds. ${this.numCompiledFiles
       } files were (re)compiled.`
     );
+
+    if (supportWatchMode)
+      info(`Finished compilation ${chalk.dim(`[${target}]`)}\n`);
+
     return { diagnostics: combinedDiagnostics };
   }
 
@@ -845,7 +856,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       case ts.DiagnosticCategory.Warning:
       case ts.DiagnosticCategory.Suggestion:
       case ts.DiagnosticCategory.Message:
-        if (message != "Starting compilation in watch mode...")
+        if (message != "Starting compilation in watch mode..." && (message != "File change detected. Starting incremental compilation..." || !supportWatchMode))
           return info(`${message} ${chalk.dim(`[${target}]`)}`);
     }
   }
@@ -936,7 +947,7 @@ export class MeteorTypescriptCompilerImpl extends BabelCompiler {
       ]
     };
 
-    program.emit(sourceFile, function (fileName, data, writeByteOrderMark) {
+    program.emit(sourceFile, function(fileName, data, writeByteOrderMark) {
       // Recalculate fileName to avoid symlink issues
       const relativeSourceFilePath = getRelativeFileName(
         sourceFile.fileName,
