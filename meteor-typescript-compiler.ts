@@ -477,6 +477,11 @@ function createAsyncAwaitTransformer(): ts.TransformerFactory<ts.SourceFile> {
           return node;
         }
 
+        // Skip nodes without a body (e.g. overload signatures)
+        if (!(node as any).body) {
+          return node;
+        }
+
         // Filter out async modifier
         const modifiers = ts.getModifiers(node as any);
         const modifiersWithoutAsync = modifiers?.filter(
