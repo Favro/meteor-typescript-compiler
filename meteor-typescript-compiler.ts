@@ -57,9 +57,13 @@ const separateCompilation =
     : ts.sys.fileExists("tsconfig-client.json") ||
     ts.sys.fileExists("tsconfig-server.json");
 
+// Fibers are gone in Meteor 3, so the default is native async/await on the server. The
+// env-var override stays for the rare case where someone needs to bisect a Fibers-era
+// behavior against the legacy lowering; that path will go away with the Fiber removal
+// commits.
 const transformAsyncAwait = getBooleanEnvironmentVariable(
   "TYPESCRIPT_TRANSFORM_ASYNC_AWAIT"
-) ?? true;
+) ?? false;
 
 export function setTraceEnabled(enabled: boolean) {
   traceEnabled = enabled;
