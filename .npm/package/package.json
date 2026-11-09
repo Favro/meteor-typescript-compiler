@@ -1,0 +1,9 @@
+{
+  "name": "refapp-meteor-typescript-compiler",
+  "private": true,
+  "dependencies": {
+    "typescript": "6.0.2",
+    "chalk": "4.1.2",
+    "@types/node": "22.13.5"
+  }
+}
